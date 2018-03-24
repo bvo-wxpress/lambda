@@ -3,27 +3,24 @@ exports.handler = (event, context, callback) => {
     var wxp_ec2_data = null;
     var ec2_public_dns = '';
     //get the user name from api gateway
-    // var cognito_username = event.requestContext.authorizer.claims['cognito:username'];
-    // var email = event.requestContext.authorizer.claims['email'];
-    var cognito_username = 'ede97585-21c7-46f1-a5e2-8cc460bfca99';
-    var email = "vo.bee92@gmail.com";
+    var cognito_username = event.requestContext.authorizer.claims['cognito:username'];
+    var email = event.requestContext.authorizer.claims['email'];
+    //FOR TESTING PURPOSES, REMOVE IN PRODUCTION
+    // var cognito_username = 'ede97585-21c7-46f1-a5e2-8cc460bfca99';
+    // var email = "vo.bee92@gmail.com";
     
     // Load the AWS SDK for Node.js
     var AWS = require('aws-sdk');
-    // Set the region 
+    // Set the region (May not be necessary)
     AWS.config.update({region: 'us-east-1'});
     
     // Create the DynamoDB service object
     var dynamo = new AWS.DynamoDB(); //TODO SHOULD DEFINE API VERSION!
+    
+    //Create EC2 Service object
     var ec2 = new AWS.EC2({apiVersion: '2016-11-15'});
-    // console.log(dynamo);
-    // return;
-    var params = {
-      TableName: 'WxPress',
-      Key: {
-        'UserId' : {S: cognito_username},
-      }
-    };
+    
+    //create return object and response for debugging purposes.
     var obj = {
     'cognito_username': cognito_username,
     'email': email,
@@ -34,63 +31,68 @@ exports.handler = (event, context, callback) => {
         "headers": { 
             "Access-Control-Allow-Origin": "*" 
         },
-        "body": null
+        "body": obj
     };
     
 
     // Call DynamoDB to read the item from the table
     function getDynamoData(){
-         
+       var params = {
+          TableName: 'WxPress',
+          Key: {
+            'UserId' : {S: cognito_username},
+          }
+        };
         dynamo.getItem(params, function(err, data) {
           if (err) {
-            obj.item = null;
-            response.body = JSON.stringify(obj);
+            response.body.error = err;
+            send();
           } else {
             wxp_dynamo_data = data.Item;
-            obj.wxpress_data = wxp_dynamo_data;
+            response.body.wxpress_data = wxp_dynamo_data;
             getEc2Data();
           }
         });
     }
+    
+    // fetch data of ec2 instance
     function getEc2Data(){
-        console.log(wxp_dynamo_data.instanceId.S);
         var ec2Params = {
             InstanceIds: [wxp_dynamo_data.instanceId.S]
         };
         ec2.describeInstances(ec2Params, function(err, data) {
           if (err) {
-            console.log(err);
-            obj.err = err;
-            obj.ec2 = null;
-          } else {
-            // console.log("Success", JSON.stringify(data));
-            obj.ec2 = data;
+            response.body.err = err;
+            send();
+          }else{
             wxp_ec2_data = data.Reservations[0].Instances[0];
+            response.body.ec2 = wxp_ec2_data;
             handleInstance();
-            
           }
         });
     }
+    
+    //Handler for instance state codes
     function handleInstance(){
-        console.log("FOO","handle instances");
         var instanceCode = wxp_ec2_data.State.Code;
         switch(instanceCode){
             case 80: //Stopped
-            case 64:
                 //start it!
-                console.log("START IT!");
                 startEc2();
                 break;
             case 16: //running
                 ec2_public_dns = wxp_ec2_data.PublicDnsName;
-                console.log("ITS RUNNING");
+                response.body.public_dns = ec2_public_dns;
                 send();
                 break;
             default:
-                console.log("Code not handled");
+                response.body.err = "EC2 State Code not handled.";
+                send();
                 break;
         }
     }
+    
+    //Initiate start of the ec2 instance
     function startEc2(){
         var params = {
             'InstanceIds': [wxp_ec2_data.InstanceId],
@@ -98,33 +100,32 @@ exports.handler = (event, context, callback) => {
         }
         ec2.startInstances(params, function(err, data) {
             if (err) {
-                console.log("Error", err);
+                response.body.err = err;
+                send();
             } else if (data) {
-                console.log("Start Instance Success", data);
                 waitForEc2();
-                
             }
         });
     }
+    
+    //Wait for the ec2 instance to start
     function waitForEc2(){
-        console.log("WAIT",'...');
         var params = {
           'InstanceIds': [wxp_ec2_data.InstanceId]
         };
         ec2.waitFor('instanceRunning', params, function(err, data) {
             if (err){
-              console.log(err, err.stack);   
+              response.body.err = err;
+              send();
             }else{
-              console.log("DONE WAITINGs",data);           // successful response
               getEc2Data();
             }
         });
     }
+    
+    //send response to endpoint
     function send(){
-        console.log("Look for public");
-        obj.ec2_data = wxp_ec2_data;
-        obj.public_dns = ec2_public_dns;
-        response.body = JSON.stringify(obj);
+        response.body = JSON.stringify(response.body);
         callback(null, response);
     }
     getDynamoData();
